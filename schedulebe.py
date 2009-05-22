@@ -18,11 +18,12 @@ import vobject
 import email, httplib
 import re
 import pycurl
+import sys
+import getopt
 
 
-debug = True
+_debug = True
 rtsvcUrl = "http://rtsvc.example.org:28080/pubcaldav/rtsvc"
-rtsvcUrl = "http://caladmin:caladmin@be-spc:8080/pubcaldav/rtsvc"
 
 rtsvcUser = "pippo"
 rtsvcPass = "pluto"
@@ -56,10 +57,7 @@ class Meeting():
                 
         return self.attendees
 
-    def __checkOrganizer(organizer):
-        """check if organizer is an user of the platform"""
 
-        return True
 
     def validate(self):
         
@@ -92,7 +90,7 @@ class Meeting():
         for rcpt in mailMessage['To'].split(","):
             self.recipient.append(cleanMailAddress(rcpt))
             
-        if debug:
+        if _debug:
             print "DEBUG: from: %s, rcpt: %s" % (mailMessage['From'], mailMessage['To'])
             
         mailWalker = mailMessage.walk()
@@ -118,7 +116,10 @@ class Meeting():
         
          
 #end class
-        
+def __checkOrganizer(organizer):
+    """check if organizer is an user of the platform"""
+
+    return True      
         
 def getMeetingInfo(meeting):
     """get meeting info """
@@ -159,7 +160,7 @@ def sendRequestToBedework(meeting):
                 
     c = pycurl.Curl()
  
-    if debug:
+    if _debug:
         print "DEBUG:" + meeting.ics.serialize()
         c.setopt(c.VERBOSE, 1)
         for a in rtsvcHeader: print "DEBUG:" + a
@@ -188,26 +189,55 @@ def countEnum(i):
     return tot
 
 
-        
+def usage():
+    print "usage: schedulebe [-v][-h][-f file]"             
 
 def main():
-    m = Meeting()
-    m.setMail( email.message_from_string(open("invito.mbox").read()))
+    # parse command line options
+    try:
+        #sys.argv[1:] strip the first argument from sys.argv[]
+        opts, args = getopt.getopt(sys.argv[1:], "hvf:", ["help", "verbose", "file"])
+    except getopt.error, msg:
+        print msg
+        print "for help use --help"
+        sys.exit(2)
+
+    file = None
     
-        
-    organizer = m.getOrganizer()
-    recipients = m.getAttendees()
-    
-    print """o:%s\na:%s""" , (organizer, recipients)
-    
-    if (__checkOrganizer(organizer)):
-        if (sendRequestToBedework(organizer, recipients, meeting)):
-            return True
-        
-    return False
-    
-        
+    for opt,arg in opts:
+        if opt in ("-h", "--help"):
+            usage()
+            sys.exit()
+        elif opt == '-v':
+            global _debug
+            _debug = True
+        elif opt in ("-f", "--file" ):
+            file = arg
 
 
-    
+    try:
+        if file==None:
+            fd=sys.stdin
+        else:
+            fd = open(file)
+            
+        m = Meeting()
+        m.setMail(email.message_from_string(fd.read()))
+        
+            
+        organizer = m.getOrganizer()
+        recipients = m.getAttendees()
+        
+        if _debug:
+            print """o:%s\na:%s""" , (organizer, recipients)
+        
+        if (__checkOrganizer(organizer)):
+            if (sendRequestToBedework(m)):
+                return True
+
+    except IOError:
+        print "error: file not found"
+        sys.exit(2)
+
+main()
     
