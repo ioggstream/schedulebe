@@ -12,17 +12,16 @@
 # get header from mail
 # use them to make a POST request to bedework RTSVC
 #
-
-
+import StringIO
 import vobject
 import email, httplib
 import re
 import pycurl
-import sys
-import getopt
+import sys, getopt
+from xml.dom import minidom
+from xml.parsers.expat import ExpatError
 
-
-_debug = True
+_debug = False
 rtsvcUrl = "http://rtsvc.example.org:28080/pubcaldav/rtsvc"
 
 rtsvcUser = "pippo"
@@ -65,13 +64,15 @@ class Meeting():
             #mail recipient must be internal and in attendees
             # in a meeting request, organizer is the mail sender
             if self.getOrganizer() != self.sender:
-                print "in %s: Organizer != sender : %s != %s"  % (self.getMethod(), self.getOrganizer(), self.sender)
+                if _debug:
+                    print "in %s: Organizer != sender : %s != %s"  % (self.getMethod(), self.getOrganizer(), self.sender)
                 return False
             
         elif self.getMethod() == "REPLY":
             #the sender mail should be one of the attendees
             if not self.sender in self.getAttendees():
-                print "in %s: sender != attendees : %s not contains  %s"  % (self.getMethod(),self.getAttendees(), self.sender)
+                if _debug:
+                    print "in %s: sender != attendees : %s not contains  %s"  % (self.getMethod(),self.getAttendees(), self.sender)
                 return False
             
         else:
@@ -94,14 +95,6 @@ class Meeting():
             print "DEBUG: from: %s, rcpt: %s" % (mailMessage['From'], mailMessage['To'])
             
         mailWalker = mailMessage.walk()
-        #print "elements: %d" %  countEnum(mailMessage.walk())
-#        for i in mailWalker:
-#                if i.get_content_type() == "text/calendar": 
-#                    if self != None:  
-#                        icalendar = vobject.readOne(i.get_payload(decode=True))
-#                        self.ics = icalendar
-#                    else:
-#                        print "Test case: %s" % i.get_payload(decode=True)
         try:
             for i in mailWalker:
                 if i.get_content_type() == "text/calendar": 
@@ -109,7 +102,8 @@ class Meeting():
                         icalendar = vobject.readOne(i.get_payload(decode=True))
                         self.ics = icalendar
                     else:
-                        print "Test case: %s" % i.get_payload(decode=True)
+                        if _debug:
+                            print "Test case: %s" % i.get_payload(decode=True)
         except vobject.base.ParseError:
             print "Error while parsing calendar"
             raise           
@@ -162,16 +156,110 @@ def sendRequestToBedework(meeting):
  
     if _debug:
         print "DEBUG:" + meeting.ics.serialize()
-        c.setopt(c.VERBOSE, 1)
+        # c.setopt(c.VERBOSE, 1)
         for a in rtsvcHeader: print "DEBUG:" + a
-
+        
+    output = StringIO.StringIO()
+    
     c.setopt(c.HTTPHEADER, rtsvcHeader)   
     c.setopt(c.POSTFIELDS, meeting.ics.serialize())
     c.setopt(c.URL, rtsvcUrl)
     c.setopt(c.HEADER, 1)
     c.setopt(c.POST, 1)
-    c.perform()
+    c.setopt(pycurl.WRITEFUNCTION, output.write)
+
+    res = c.perform()
+    if _debug:
+        # print output
+        print """DEBUG request %d """ % c.getinfo(pycurl.HTTP_CODE)
+    
+
+    #response = output.read()
+    response = output.getvalue()
+    if _debug:
+        print "DEBUG: response: [%s]" % response
+
+    parseResponse(response)
+        
     return True
+
+def parseRecipientResponse(response):
+    """return True if the scheduling request to the recipient is successful
+      <ns1:response>
+        <ns1:recipient>
+          <href>attendee@mysite.edu</href>
+        </ns1:recipient>
+        <ns1:request-status>2.0;Success</ns1:request-status>
+      </ns1:response>    
+    """
+    if response.localName != 'response':
+        return False
+    
+    for walk in response.childNodes:
+        if walk.localName == 'recipient':
+            attendees = walk.getElementsByTagName('href')
+            attendee = attendees[0].childNodes[0].data
+                
+        elif walk.localName == 'request-status':
+            if _debug:
+                print "REPORT: attendee: %s\t\tstatus: %s" % (attendee, walk.childNodes[0].data)
+                
+            v = {'2.0;Success'  : True,
+                 '1.0;Deferred' : True,
+                 'default' : False                
+                 }
+            
+            return v.get(walk.childNodes[0].data, 'default')
+            
+            
+    # false by default  
+    return False
+
+def parseResponse(response):
+    """Parse the xml response of the RTSVC server
+    The response is like:
+    HttpHeaders
+    ...
+    <?xml version="1.0" encoding="UTF-8" ?>
+        <ns1:schedule-response xmlns="DAV:" xmlns:ns1="urn:ietf:params:xml:ns:caldav" xmlns:ns2="http://www.w3.org/2002/12/cal/ical#">
+          <ns1:response>
+            <ns1:recipient>
+              <href>attendee@mysite.edu</href>
+            </ns1:recipient>
+            <ns1:request-status>2.0;Success</ns1:request-status>
+          </ns1:response>
+        </ns1:schedule-response>
+    """
+    ret = False
+    
+    # strip http headers
+    try:
+        response = response[response.index('<'):]
+    except ValueError:
+        print "DEBUG: Can't find < in response"
+        return False
+    
+    #support multiple xml documents in response
+    for singleResponse in response.split('\n<?xml'):
+        if len(singleResponse) <= 5:
+            if _debug:
+                print "skipping short response" + singleResponse
+            continue
+        
+        try:
+            doc = minidom.parseString(singleResponse)
+            for walk in doc.childNodes:
+                if walk.localName == 'schedule-response':
+                    for resp in walk.getElementsByTagName(walk.prefix + ':response'):
+                        ret = parseRecipientResponse(resp)
+
+        except ExpatError:
+            print "Errore nella stringa [%s] " % singleResponse
+            raise
+            ret = False
+          
+    return ret      
+
 
 def __notifyUpdate(isError):
     """notify the user that bedework has been nicely updated"""
@@ -239,5 +327,8 @@ def main():
         print "error: file not found"
         sys.exit(2)
 
-main()
+# if it's standalone, exec
+if __name__ == "__main__":
+    main()
+
     
