@@ -1,3 +1,4 @@
+#!/usr/bin/python
 # schedulebe (c) robipolli@gmail.com
 # a postfix plugin for managing events in python
 # License: GPL2
@@ -18,16 +19,26 @@ import email, httplib
 import re
 import pycurl
 import sys, getopt
+import ldap
+
 from xml.dom import minidom
 from xml.parsers.expat import ExpatError
 
 _debug = False
-rtsvcUrl = "http://rtsvc.example.org:28080/pubcaldav/rtsvc"
+#rtsvcUrl = "http://caladmin:caladmin@velvet:28080/ucaldav/rtsvc"
+#rtsvcUrl = "http://mmt-l-al20:8080/pubcaldav/rtsvc"
+rtsvcUrl = None
+notifyToSender = False
+ldapUrl = None
+ldapBaseDN = None
+ldapCheck = False
+useLDAPs = False
+ldapCACertFile = None
 
-rtsvcUser = "pippo"
-rtsvcPass = "pluto"
+# rtsvcUser = "pippo"
+# rtsvcPass = "pluto"
 
-class Meeting():
+class Meeting:
 
     def __init__(self):
         self.ics = None
@@ -136,6 +147,34 @@ def getRecipientsFromMail(mail):
     recipient = mail['To']
     return recipients
 
+def isLocalUser(mailAddress):
+    """determine whether the user is local"""
+    result = False
+    try:
+	l = ldap.initialize(ldapUrl)
+	if useLDAPs:
+	    ldap.set_option(ldap.OPT_X_TLS_CACERTFILE, ldapCACertFile)
+	    ldap.set_option(ldap.OPT_X_TLS_CIPHER_SUITE, "HIGH:MEDIUM:+SSLv3:RSA")
+	    ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, 1)
+	searchFilter = "mail="+mailAddress
+	retrieveAttributes = ["mail"]
+	ldap_result_id = l.search(ldapBaseDN, ldap.SCOPE_SUBTREE, searchFilter, retrieveAttributes)
+	result_type,result_data = l.result(ldap_result_id, 0)
+	if (result_data != []):
+	    result = True
+
+    except ldap.LDAPError, e:
+	print "DEBUG: LDAPError"
+	if _debug:
+	    raise
+
+    except Exception, e:
+	print "ERROR"
+	if _debug:
+	    raise
+
+    return result
+
 def sendRequestToBedework(meeting):        
     """send a POST request to RTSVC url, setting    """
     """    Header: originator: me@gmail.com         """
@@ -149,8 +188,19 @@ def sendRequestToBedework(meeting):
     rtsvcHeader = [ 'Content-Type:text/calendar; charset=UTF-8' ]
     rtsvcHeader.append('originator: ' + meeting.sender)
     
-    for a in set(meeting.getAttendees()).intersection(meeting.recipient):
-        rtsvcHeader.append('recipient: ' + a)    
+    rcptList = []
+    
+    if meeting.getMethod() == "REQUEST":
+	rcptList = set(meeting.getAttendees()).intersection(meeting.recipient)
+    elif meeting.getMethod() == "REPLY":
+	rcptList.append(meeting.getOrganizer())
+	rcptList = set(rcptList).intersection(meeting.recipient)
+	if notifyToSender:
+	    if (ldapCheck and isLocalUser(meeting.sender)) or (not ldapCheck):
+		rcptList.add(meeting.sender)
+	
+    for a in rcptList:
+	rtsvcHeader.append('recipient: ' + a)    
                 
     c = pycurl.Curl()
  
@@ -278,19 +328,28 @@ def countEnum(i):
 
 
 def usage():
-    print "usage: schedulebe [-v][-h][-f file]"             
+    print "usage: schedulebe -U [-v][-h][-f file][-u username -p password][-s][-l ldapUrl -b ldapBaseDN [-S -c cacertfile]]" 
 
 def main():
     # parse command line options
     try:
         #sys.argv[1:] strip the first argument from sys.argv[]
-        opts, args = getopt.getopt(sys.argv[1:], "hvf:", ["help", "verbose", "file"])
+        opts, args = getopt.getopt(sys.argv[1:], "hvf:U:u:p:sl:b:Sc:", ["help", "verbose", "file", "URL", "username", "password", "notifytosender", "ldapurl", "ldapbasedn", "SSL", "cacertfile"])
     except getopt.error, msg:
         print msg
         print "for help use --help"
         sys.exit(2)
 
     file = None
+    url = None
+    username = None
+    password = None
+    global notifyToSender
+    global ldapUrl
+    global ldapBaseDN
+    global ldapCheck
+    global useLDAPs
+    global ldapCACertFile
     
     for opt,arg in opts:
         if opt in ("-h", "--help"):
@@ -300,8 +359,41 @@ def main():
             global _debug
             _debug = True
         elif opt in ("-f", "--file" ):
-            file = arg
+	    file = arg
+	elif opt in ("-U", "--URL"):
+	    url = arg
+	elif opt in ("-u", "--username"):
+   	    username = arg
+	elif opt in ("-p", "--password"):
+  	    password = arg
+	elif opt in ("-s", "--notifytosender"):
+            notifyToSender = True
+	elif opt in ("-l", "--ldapurl"):
+            ldapUrl = arg
+	    ldapCheck = True
+	elif opt in ("-b", "--ldapbasedn"):
+            ldapBaseDN = arg
+	elif opt in ("-S", "--SSL"):
+            useLDAPs = True
+	elif opt in ("-c", "--cacertfile"):
+            ldapCACertFile = arg
+    
+    if (url == None) or (username != None and password == None) or (username == None and password != None) or (ldapUrl == None and ldapBaseDN != None ) or (ldapUrl != None and ldapBaseDN == None) or (useLDAPs and ldapCACertFile == None) or (not useLDAPs and ldapCACertFile != None):
+        print url
+        usage()
+	sys.exit()
 
+    if url.find("://") == -1:
+        print "bad url"
+	usage()
+	sys.exit(2)
+
+    global rtsvcUrl
+    if username != None and password != None:
+        schema, address = url.split("://")
+        rtsvcUrl = schema + "://" + username + ":" + password + "@" + address
+    else:
+        rtsvcUrl = url
 
     try:
         if file==None:
@@ -317,15 +409,21 @@ def main():
         recipients = m.getAttendees()
         
         if _debug:
-            print """o:%s\na:%s""" , (organizer, recipients)
+            print "organizer :%s\nattendees:%s\n" % (organizer, recipients)
         
         if (__checkOrganizer(organizer)):
             if (sendRequestToBedework(m)):
+                print "calendar event synchronized"
                 return True
 
     except IOError:
         print "error: file not found"
         sys.exit(2)
+    except:
+        print "error: No ics found"
+
+        sys.exit(2)
+
 
 # if it's standalone, exec
 if __name__ == "__main__":

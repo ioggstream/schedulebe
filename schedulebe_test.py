@@ -73,6 +73,19 @@ class TestScheduleBe(unittest.TestCase):
         self.meeting.setMail(mymsg)
         schedulebe.sendRequestToBedework(self.meeting) 
       
+    def testIsLocalUser(self):
+        """try to check if the user is local"""
+	global ldapUrl
+	global ldapCACertFile
+	global ldapBaseDN
+	global useLDAPs
+	ldapUrl = "ldaps://hostname.domainname:636"
+	ldapCACertFile = "/etc/ssl/ldap/cacert.pem"
+	ldapBaseDN = "dc=yyy,dc=zz"
+	useLDAPs = True
+	for a in ["a@b.it","xxx@yyy.zz"]:
+	    assert schedulebe.isLocalUser(a)
+
     def testParseResponse(self):
         response = """HTTP/1.1 100 Continue
 HTTP/1.1 200 OK
