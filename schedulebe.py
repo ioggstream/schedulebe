@@ -419,9 +419,12 @@ def main():
     except IOError:
         print "error: file not found"
         sys.exit(2)
-    except:
-        print "error: No ics found"
-
+    except pycurl.error, exc:
+        x, y = exc
+        print "error: cannot connect to server %s" % y
+        sys.exit(2)
+    except exc:
+        print "error: generic error or no ics found, %r" % exc        
         sys.exit(2)
 
 
